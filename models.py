@@ -1,6 +1,8 @@
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel
+
+from enums import MediaType
 
 
 class BBox(BaseModel):
@@ -30,3 +32,10 @@ class BBox(BaseModel):
                 f"bbox.ymin <= {self.ymax}",
             ]
         )
+
+
+class Link(BaseModel):
+    title: str | None = None
+    rel: Literal["self", "next", "prev"]
+    href: str
+    type: MediaType

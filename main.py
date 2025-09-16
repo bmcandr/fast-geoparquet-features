@@ -3,6 +3,7 @@ import logging
 from collections.abc import Generator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
+from urllib.parse import urlencode
 
 import cql2
 import duckdb
@@ -11,7 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
 from enums import MediaType, OutputFormat
-from models import BBox
+from models import BBox, Link
 
 logger = logging.getLogger("uvicorn")
 
@@ -69,11 +70,55 @@ def dump_feat(feat: dict[str, Any]) -> bytes:
     )
 
 
+def build_links(
+    request: Request,
+    number_matched: int,
+    limit: int,
+    offset: int,
+) -> list[Link]:
+    params: dict[str, Any] = request.query_params._dict.copy()
+    links = [
+        Link(
+            title="Features",
+            rel="self",
+            href=request.url._url,
+            type=MediaType.GEOJSON,
+        )
+    ]
+
+    base_url = request.url_for("get_features")._url
+
+    if (next_offset := (offset + limit)) < number_matched:
+        params["offset"] = next_offset
+        links.append(
+            Link(
+                title="Next page",
+                rel="next",
+                href=f"{base_url}?{urlencode(params)}",
+                type=MediaType.GEOJSON,
+            )
+        )
+
+    if offset > 0:
+        params["offset"] = max(offset - limit, 0)
+        links.append(
+            Link(
+                title="Previous page",
+                rel="prev",
+                href=f"{base_url}?{urlencode(params)}",
+                type=MediaType.GEOJSON,
+            )
+        )
+
+    return links
+
+
 def stream_feature_collection(
     features: Generator[dict[str, Any]],
     number_matched: int,
     limit: int,
     offset: int,
+    request: Request,
 ) -> Generator[bytes]:
     yield b'{"type":"FeatureCollection","features":['
 
@@ -90,6 +135,10 @@ def stream_feature_collection(
                 "numberReturned": i + 1,
                 "limit": limit,
                 "offset": offset,
+                "links": [
+                    link.model_dump()
+                    for link in build_links(request, number_matched, limit, offset)
+                ],
             }
         )
         .decode()
@@ -168,6 +217,7 @@ async def stream_features(
     limit: int,
     offset: int,
     geom_column: str,
+    request: Request,
     bbox: BBox | None = None,
     filter: str | None = None,
     output_format: OutputFormat | None = None,
@@ -194,15 +244,19 @@ async def stream_features(
         )
     ).limit(limit, offset=offset)
 
-    # TODO: support GeoJSONSeq, ndjson, csv, etc.
-
-    generator = feature_generator(filtered, geom_column)
+    features = feature_generator(filtered, geom_column)
     if output_format == OutputFormat.GEOJSON or output_format is None:
-        stream = stream_feature_collection(generator, total, limit, offset)
+        stream = stream_feature_collection(
+            features=features,
+            number_matched=total,
+            limit=limit,
+            offset=offset,
+            request=request,
+        )
     elif output_format in [OutputFormat.GEOJSONSEQ, OutputFormat.NDJSON]:
-        stream = stream_geojsonseq(generator)
+        stream = stream_geojsonseq(features)
     elif output_format == OutputFormat.CSV:
-        stream = stream_csv(generator)
+        stream = stream_csv(features)
 
     for chunk in stream:
         yield chunk
@@ -233,11 +287,13 @@ def parse_bbox(bbox: str | None = None) -> BBox | None:
             "content": {
                 MediaType.GEOJSON: {},
                 MediaType.GEOJSONSEQ: {},
+                MediaType.CSV: {},
             }
         }
     },
 )
 async def get_features(
+    request: Request,
     con: duckdb.DuckDBPyConnection = Depends(duckdb_cursor),
     url: str = Query(),
     limit: int = Query(
@@ -246,7 +302,7 @@ async def get_features(
         lte=10_000,
     ),
     offset: int = Query(default=0, ge=0),
-    geom_column: str = Query(default="geometry", alias="geom-column"),
+    geom_column: str = Query(default="geometry"),
     filter: str | None = Query(None, description="A CQL-Text filter statement"),
     bbox: Annotated[BBox, str] | None = Depends(parse_bbox),
     f: OutputFormat = OutputFormat.GEOJSON,
@@ -263,6 +319,7 @@ async def get_features(
             bbox=bbox,
             filter=filter,
             output_format=f,
+            request=request,
         ),
         media_type=MediaType[f.name],
     )
