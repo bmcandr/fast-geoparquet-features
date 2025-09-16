@@ -3,7 +3,7 @@ import logging
 import re
 from collections.abc import Generator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
 import cql2
@@ -16,6 +16,8 @@ from enums import MediaType, OutputFormat
 from models import BBox, Link
 
 logger = logging.getLogger("uvicorn")
+
+FilterLang = Literal["cql2-text", "cql2-json"]
 
 
 @asynccontextmanager
@@ -184,6 +186,7 @@ def base_rel(
     url: str,
     bbox: BBox | None,
     filter: str | None,
+    filter_lang: FilterLang,
 ) -> duckdb.DuckDBPyRelation:
     filters = list()
 
@@ -193,7 +196,12 @@ def base_rel(
     cql_filter = None
     cql_params = None
     if filter:
-        cql_filter = cql2.parse_text(filter).to_sql()
+        parsed_filter = (
+            cql2.parse_text(filter)
+            if filter_lang == "cql2-text"
+            else cql2.parse_json(filter)
+        )
+        cql_filter = parsed_filter.to_sql()
         filters.append(cql_filter.query)
         cql_params = cql_filter.params
 
@@ -225,6 +233,7 @@ async def stream_features(
     request: Request,
     bbox: BBox | None = None,
     filter: str | None = None,
+    filter_lang: FilterLang = "cql2-text",
     output_format: OutputFormat | None = None,
 ):
     """Stream features from GeoParquet."""
@@ -233,6 +242,7 @@ async def stream_features(
         url=url,
         bbox=bbox,
         filter=filter,
+        filter_lang=filter_lang,
     )
     total = get_count(rel)
 
@@ -308,12 +318,12 @@ async def get_features(
     ),
     offset: int = Query(default=0, ge=0),
     geom_column: str = Query(default="geometry"),
-    filter: str | None = Query(None, description="A CQL-Text filter statement"),
+    filter: str | None = Query(None, description="A CQL2 filter statement"),
+    filter_lang: FilterLang = Query(default="cql2-text"),
     bbox: Annotated[BBox, str] | None = Depends(parse_bbox),
     f: OutputFormat = OutputFormat.GEOJSON,
 ):
     """Get Features"""
-
     return StreamingResponse(
         stream_features(
             con=con,
@@ -323,6 +333,7 @@ async def get_features(
             geom_column=geom_column,
             bbox=bbox,
             filter=filter,
+            filter_lang=filter_lang,
             output_format=f,
             request=request,
         ),
