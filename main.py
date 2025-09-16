@@ -1,5 +1,6 @@
 import csv
 import logging
+import re
 from collections.abc import Generator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -197,6 +198,10 @@ def base_rel(
         cql_params = cql_filter.params
 
     filter_stmt = f"WHERE {' AND '.join(filters)}"
+
+    # HACK: rewrite scheme for Azure URLs (https:// -> az://)
+    if url.startswith("https") and "blob.core.windows.net" in url:
+        url = re.sub("^https", "az", url)
 
     rel = con.sql(
         f"""SELECT *
