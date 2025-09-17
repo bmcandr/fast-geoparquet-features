@@ -19,9 +19,14 @@ A simple GeoParquet feature server built with FastAPI and DuckDB. Query, filter,
 * `uv run fastapi dev main.py`
 * Open `http://localhost:8000/docs` in your browser to view the interactive Swagger docs
 
+> [!TIP]
+> If request errors occur when querying datasets in S3, try setting `AWS_REGION=<dataset-region>` in your environment.
+
 ## Examples
 
-Here are some examples of querying Overture Foundation's Buildings dataset directly in S3.
+### Features API
+
+Features are served from the `/features` endpoint. Here are some examples of querying Overture Foundation's Buildings dataset directly in S3.
 
 * Bounding box filter:
 
@@ -44,11 +49,25 @@ Here are some examples of querying Overture Foundation's Buildings dataset direc
 
         ![demo](./public/height-filter-demo.png)
 
+## Vector Tiles API
+
+MVT/PBF vector tiles are served from the `/tiles/{z}/{x}/{y}` endpoint. A simple map view is available at the `/viewer` endpoint.
+
+> [!WARNING]
+> Vector tile generation can be pretty slow (on the order of seconds to tens of seonds), even after the initial metadata scan.
+> Running with multiple workers (e.g., `uv run fastapi run main.py --workers=4`) can improve performance by distributing
+> request processing across threads.
+
+* Example: [http://localhost:8000/viewer?url=s3://overturemaps-us-west-2/release/2025-08-20.1/theme=buildings/type=building/*](http://localhost:8000/viewer?url=s3://overturemaps-us-west-2/release/2025-08-20.1/theme=buildings/type=building/*)
+
+    <img src="./public/viewer.gif" width=600 alt="Vector tiles preview"/>
+
 ## Notes
 
 * Bounding box filtering requires GeoParquet created with bbox/covering metadata as described in [the v1.1.0 spec](https://geoparquet.org/releases/v1.1.0/)
 * Performance is best with [a spatially sorted GeoParquet](https://github.com/opengeospatial/geoparquet/blob/main/format-specs/distributing-geoparquet.md)
-* The first query of a large and/or partitioned GeoParquet will take significantly longer than subsequent queries due to the initial read of the Parquet metadata (which DuckDB caches for reuse). For example, the first query of the Overture Buildings dataset after a fresh start takes ~30s. After that, the same query is signficantly faster.
+* The first query of a large and/or partitioned GeoParquet will take significantly longer than subsequent queries due to the initial scan of the Parquet metadata (which DuckDB caches and reuses). For example, the first query of the Overture Buildings dataset after a fresh start takes ~30s. After that, the same query is signficantly faster.
+* Vector tile latency is...not great. TBH, it's not too surprising given the network hops and computation involved in generating each tile. The queries are pretty straightforward, but maybe there are parameter tweaks or SQL-fu that could speed things up? LMK! Deploying the service colocated with the data, horizontal scaling, and/or aggressively caching requests could also improve responsiveness, but at that point maybe PMTiles is a simpler solution?
 
 ## Acknowledgements
 
