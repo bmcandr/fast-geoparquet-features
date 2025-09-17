@@ -9,8 +9,8 @@ from urllib.parse import urlencode
 import cql2
 import duckdb
 import orjson
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from enums import MediaType, OutputFormat
 from models import BBox, Link
@@ -26,8 +26,9 @@ async def lifespan(app: FastAPI):
     * A reusable DuckDB connection
     """
     con = duckdb.connect()
-    extensions = ["httpfs", "azure", "aws", "spatial"]
+    extensions = ["httpfs", "azure", "aws", "s3", "spatial"]
     con.execute("\n".join(f"INSTALL {ext}; LOAD {ext};" for ext in extensions))
+    con.execute("SET http_keep_alive=false;")
 
     app.state.db = con
     yield
@@ -145,7 +146,7 @@ def stream_feature_collection(
             }
         )
         .decode()
-        .strip("{}")
+        .strip("{")
     )
     yield f"], {metadata}}}".encode()
 
@@ -358,3 +359,197 @@ def get_feature_count(
     )
     total = get_count(rel)
     return {"numberMatched": total}
+
+
+@app.get("/tiles/{z}/{x}/{y}")
+async def get_tile(
+    z: int,
+    x: int,
+    y: int,
+    url: str,
+    filter: str | None = Query(None),
+    filter_lang: FilterLang = Query(default="cql2-text"),
+    con: duckdb.DuckDBPyConnection = Depends(duckdb_cursor),
+):
+    tile_bbox = next(
+        iter(
+            con.sql(
+                """SELECT ST_Extent(
+    ST_Transform(
+        ST_TileEnvelope($1, $2, $3),
+        'EPSG:3857',
+        'EPSG:4326',
+        always_xy := true
+    )
+)""",
+                params=[z, x, y],
+            ).fetchone()
+            or []
+        ),
+        None,
+    )
+
+    if tile_bbox is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    rel = base_rel(
+        con=con,
+        url=url,
+        bbox=BBox(
+            xmin=tile_bbox["min_x"],
+            ymin=tile_bbox["min_y"],
+            xmax=tile_bbox["max_x"],
+            ymax=tile_bbox["max_y"],
+        ),
+        filter=filter,
+        filter_lang=filter_lang,
+    )
+
+    rel.filter(f"""ST_Intersects(
+    ST_Transform(geometry, 'EPSG:4326', 'EPSG:3857', always_xy := true),
+    ST_TileEnvelope({z}, {x}, {y})
+)""")
+
+    tile_blob = rel.aggregate(f"""ST_AsMVT(
+        {{
+            "geometry": ST_AsMVTGeom(
+                ST_Transform(
+                    geometry,
+                    'EPSG:4326',
+                    'EPSG:3857',
+                    always_xy := true
+                ),
+                ST_Extent(ST_TileEnvelope({z}, {x}, {y}))
+            )
+        }}
+    )""").fetchone()
+
+    tile = tile_blob[0] if tile_blob and tile_blob[0] else b""
+
+    return Response(
+        tile,
+        media_type=MediaType.PBF,
+        headers={"Cache-Control": "max-age=3600, public"},
+    )
+
+
+INDEX_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Vector Tile Viewer</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+    <script src='https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js'></script>
+    <link href='https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css' rel='stylesheet' />
+    <style>
+        body {{ margin: 0; padding: 0; }}
+        #map {{ position: absolute; top: 0; bottom: 0; width: 100%; }}
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+    const map = new maplibregl.Map({{
+        container: 'map',
+        style: {{
+            version: 8,
+            sources: {{
+                'default': {{
+                    type: 'vector',
+                    tiles: ['{tiles_url}'],
+                    minzoom: 2
+                }},
+                // Also use a public open source basemap
+                'osm': {{
+                    type: 'raster',
+                    tiles: [
+                        'https://a.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
+                        'https://b.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
+                        'https://c.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png'
+                    ],
+                    tileSize: 256,
+                    minzoom: 0
+                }}
+            }},
+            layers: [
+                {{
+                    id: 'background',
+                    type: 'background',
+                    paint: {{ 'background-color': '#a0c8f0' }}
+                }},
+                {{
+                    id: 'osm',
+                    type: 'raster',
+                    source: 'osm',
+                    minzoom: 2,
+                    maxzoom: 19
+                }},
+                {{
+                    id: 'default',
+                    type: 'fill',
+                    source: 'default',
+                    'source-layer': 'layer',
+                    paint: {{
+                        'fill-color': 'blue',
+                        'fill-opacity': 0.6,
+                        'fill-outline-color': '#ffffff'
+                    }}
+                }}
+            ]
+        }},
+        // Zoom in on new york
+        center: [-74.0060, 40.7128],
+        zoom: 16
+    }});
+    map.addControl(new maplibregl.NavigationControl());
+    // Add click handler to show feature properties
+    map.on('click', 'buildings-fill', (e) => {{
+        const coordinates = e.lngLat;
+        const properties = e.features[0].properties;
+        let popupContent = '<h3>Building Properties</h3>';
+        for (const [key, value] of Object.entries(properties)) {{
+            popupContent += `<p><strong>${{key}}:</strong> ${{value}}</p>`;
+        }}
+        new maplibregl.Popup()
+            .setLngLat(coordinates)
+            .setHTML(popupContent)
+            .addTo(map);
+    }});
+    // Change cursor on hover
+    map.on('mouseenter', 'buildings-fill', () => {{
+        map.getCanvas().style.cursor = 'pointer';
+    }});
+    map.on('mouseleave', 'buildings-fill', () => {{
+        map.getCanvas().style.cursor = '';
+    }});
+</script>
+</body>
+</html>
+"""
+
+
+# Serve the static HTML file for the index page
+@app.get("/viewer")
+def viewier(
+    request: Request,
+    url: str = Query(),
+    filter: str | None = Query(None),
+    filter_lang: FilterLang = Query(default="cql2-text"),
+):
+    params = {
+        k: v
+        for k, v in {
+            "url": url,
+            "filter": filter,
+            "filter_lang": filter_lang,
+        }.items()
+        if v is not None
+    }
+    tiles_url = (
+        f"{request.base_url._url.rstrip('/')}/tiles/{{z}}/{{x}}/{{y}}?"
+        + urlencode(params)
+    )
+    return HTMLResponse(INDEX_HTML.format(tiles_url=tiles_url), media_type="text/html")
