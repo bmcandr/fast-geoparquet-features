@@ -407,10 +407,10 @@ async def get_tile(
         filter_lang=filter_lang,
     )
 
-    rel.filter(f"""ST_Intersects(
-    ST_Transform(geometry, 'EPSG:4326', 'EPSG:3857', always_xy := true),
-    ST_TileEnvelope({z}, {x}, {y})
-)""")
+    #     rel.filter(f"""ST_Intersects(
+    #     ST_Transform(geometry, 'EPSG:4326', 'EPSG:3857', always_xy := true),
+    #     ST_TileEnvelope({z}, {x}, {y})
+    # )""")
 
     tile_blob = rel.aggregate(f"""ST_AsMVT(
         {{
