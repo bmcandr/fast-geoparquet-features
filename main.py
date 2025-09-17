@@ -11,11 +11,17 @@ import duckdb
 import orjson
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, StreamingResponse
+from jinja2 import Environment, FileSystemLoader
+from starlette.templating import Jinja2Templates
 
 from enums import MediaType, OutputFormat
 from models import BBox, Link
 
 logger = logging.getLogger("uvicorn")
+
+
+jinja2_env = Environment(loader=FileSystemLoader("./templates"))
+templates = Jinja2Templates(env=jinja2_env)
 
 FilterLang = Literal["cql2-text", "cql2-json"]
 
@@ -361,16 +367,28 @@ def get_feature_count(
     return {"numberMatched": total}
 
 
-@app.get("/tiles/{z}/{x}/{y}")
+@app.get(
+    "/tiles/{z}/{x}/{y}",
+    responses={
+        status.HTTP_200_OK: {
+            "content": {
+                MediaType.PBF: {},
+            }
+        }
+    },
+)
 async def get_tile(
     z: int,
     x: int,
     y: int,
     url: str,
+    geom_column: str | None = Query(None),
     filter: str | None = Query(None),
     filter_lang: FilterLang = Query(default="cql2-text"),
     con: duckdb.DuckDBPyConnection = Depends(duckdb_cursor),
 ):
+    geom_column = geom_column or "geometry"
+
     tile_bbox = next(
         iter(
             con.sql(
@@ -407,22 +425,29 @@ async def get_tile(
         filter_lang=filter_lang,
     )
 
+    # NOTE: ST_Intersects unnecessary after bbox filter?
     #     rel.filter(f"""ST_Intersects(
-    #     ST_Transform(geometry, 'EPSG:4326', 'EPSG:3857', always_xy := true),
-    #     ST_TileEnvelope({z}, {x}, {y})
+    #         {geom_column},
+    #         ST_Transform(
+    #             ST_TileEnvelope({z}, {x}, {y}),
+    #             'EPSG:3857',
+    #             'EPSG:4326',
+    #             always_xy := true
+    #         )
     # )""")
 
     tile_blob = rel.aggregate(f"""ST_AsMVT(
         {{
             "geometry": ST_AsMVTGeom(
                 ST_Transform(
-                    geometry,
+                    {geom_column},
                     'EPSG:4326',
                     'EPSG:3857',
                     always_xy := true
                 ),
                 ST_Extent(ST_TileEnvelope({z}, {x}, {y}))
-            )
+            ),
+            "id": id
         }}
     )""").fetchone()
 
@@ -435,114 +460,28 @@ async def get_tile(
     )
 
 
-INDEX_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Vector Tile Viewer</title>
-    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
-    <script src='https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js'></script>
-    <link href='https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css' rel='stylesheet' />
-    <style>
-        body {{ margin: 0; padding: 0; }}
-        #map {{ position: absolute; top: 0; bottom: 0; width: 100%; }}
-    </style>
-</head>
-<body>
-<div id="map"></div>
-<script>
-    const map = new maplibregl.Map({{
-        container: 'map',
-        style: {{
-            version: 8,
-            sources: {{
-                'default': {{
-                    type: 'vector',
-                    tiles: ['{tiles_url}'],
-                    minzoom: 2
-                }},
-                // Also use a public open source basemap
-                'osm': {{
-                    type: 'raster',
-                    tiles: [
-                        'https://a.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
-                        'https://b.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
-                        'https://c.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png'
-                    ],
-                    tileSize: 256,
-                    minzoom: 0
-                }}
-            }},
-            layers: [
-                {{
-                    id: 'background',
-                    type: 'background',
-                    paint: {{ 'background-color': '#a0c8f0' }}
-                }},
-                {{
-                    id: 'osm',
-                    type: 'raster',
-                    source: 'osm',
-                    minzoom: 2,
-                    maxzoom: 19
-                }},
-                {{
-                    id: 'default',
-                    type: 'fill',
-                    source: 'default',
-                    'source-layer': 'layer',
-                    paint: {{
-                        'fill-color': 'blue',
-                        'fill-opacity': 0.6,
-                        'fill-outline-color': '#ffffff'
-                    }}
-                }}
-            ]
-        }},
-        // Zoom in on new york
-        center: [-74.0060, 40.7128],
-        zoom: 16
-    }});
-    map.addControl(new maplibregl.NavigationControl());
-    // Add click handler to show feature properties
-    map.on('click', 'buildings-fill', (e) => {{
-        const coordinates = e.lngLat;
-        const properties = e.features[0].properties;
-        let popupContent = '<h3>Building Properties</h3>';
-        for (const [key, value] of Object.entries(properties)) {{
-            popupContent += `<p><strong>${{key}}:</strong> ${{value}}</p>`;
-        }}
-        new maplibregl.Popup()
-            .setLngLat(coordinates)
-            .setHTML(popupContent)
-            .addTo(map);
-    }});
-    // Change cursor on hover
-    map.on('mouseenter', 'buildings-fill', () => {{
-        map.getCanvas().style.cursor = 'pointer';
-    }});
-    map.on('mouseleave', 'buildings-fill', () => {{
-        map.getCanvas().style.cursor = '';
-    }});
-</script>
-</body>
-</html>
-"""
-
-
-# Serve the static HTML file for the index page
-@app.get("/viewer")
-def viewier(
+@app.get(
+    "/viewer",
+    responses={
+        status.HTTP_200_OK: {
+            "content": {
+                MediaType.HTML: {},
+            }
+        }
+    },
+)
+def viewer(
     request: Request,
     url: str = Query(),
+    geom_column: str | None = Query(None),
     filter: str | None = Query(None),
-    filter_lang: FilterLang = Query(default="cql2-text"),
+    filter_lang: FilterLang | None = Query(default=None),
 ):
     params = {
         k: v
         for k, v in {
             "url": url,
+            "geom_column": geom_column,
             "filter": filter,
             "filter_lang": filter_lang,
         }.items()
@@ -552,4 +491,8 @@ def viewier(
         f"{request.base_url._url.rstrip('/')}/tiles/{{z}}/{{x}}/{{y}}?"
         + urlencode(params)
     )
-    return HTMLResponse(INDEX_HTML.format(tiles_url=tiles_url), media_type="text/html")
+
+    return HTMLResponse(
+        templates.get_template("viewer.html").render(tiles_url=tiles_url),
+        media_type=MediaType.HTML,
+    )

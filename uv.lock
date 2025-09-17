@@ -150,6 +150,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "fastapi", extra = ["standard"] },
     { name = "geopandas" },
+    { name = "jinja2" },
     { name = "orjson" },
     { name = "pyarrow" },
 ]
@@ -160,6 +161,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.4.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.116.1" },
     { name = "geopandas", specifier = ">=1.1.1" },
+    { name = "jinja2", specifier = ">=3.1.6" },
     { name = "orjson", specifier = ">=3.11.3" },
     { name = "pyarrow", specifier = ">=21.0.0" },
 ]
