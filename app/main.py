@@ -2,6 +2,7 @@ import logging
 import re
 from collections.abc import Generator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
@@ -20,10 +21,14 @@ from app.serializers import stream_csv, stream_feature_collection, stream_geojso
 logger = logging.getLogger("uvicorn")
 
 
-jinja2_env = Environment(loader=FileSystemLoader("./templates"))
+jinja2_env = Environment(
+    loader=FileSystemLoader(f"{Path(__file__).resolve().parent}/templates")
+)
 templates = Jinja2Templates(env=jinja2_env)
 
 FilterLang = Literal["cql2-text", "cql2-json"]
+
+BBoxQuery = Query(default="bbox")
 
 
 @asynccontextmanager
@@ -35,6 +40,13 @@ async def lifespan(app: FastAPI):
     extensions = ["httpfs", "azure", "aws", "s3", "spatial"]
     con.execute("\n".join(f"INSTALL {ext}; LOAD {ext};" for ext in extensions))
     con.execute("SET http_keep_alive=false;")
+
+    # TODO: figure out better pattern for this?
+    con.execute("""CREATE OR REPLACE SECRET secret (
+    TYPE s3,
+    PROVIDER config,
+    REGION 'us-west-2'
+);""")
 
     app.state.db = con
     yield
@@ -313,6 +325,7 @@ async def get_tile(
     y: int,
     url: str,
     geom_column: str | None = Query(None),
+    bbox_column: str | None = Query(None),
     filter: str | None = Query(None),
     filter_lang: FilterLang = Query(default="cql2-text"),
     con: duckdb.DuckDBPyConnection = Depends(duckdb_cursor),
@@ -346,6 +359,7 @@ async def get_tile(
         con=con,
         url=url,
         bbox=BBox(
+            bbox_column=bbox_column,
             xmin=tile_bbox["min_x"],
             ymin=tile_bbox["min_y"],
             xmax=tile_bbox["max_x"],
@@ -403,6 +417,7 @@ def viewer(
     request: Request,
     url: str = Query(),
     geom_column: str | None = Query(None),
+    bbox_column: str = BBoxQuery,
     filter: str | None = Query(None),
     filter_lang: FilterLang | None = Query(default=None),
 ):
@@ -411,6 +426,7 @@ def viewer(
         for k, v in {
             "url": url,
             "geom_column": geom_column,
+            "bbox_column": bbox_column,
             "filter": filter,
             "filter_lang": filter_lang,
         }.items()
