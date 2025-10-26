@@ -6,6 +6,7 @@ from app.enums import MediaType
 
 
 class BBox(BaseModel):
+    bbox_column: str = "bbox"
     xmin: float
     ymin: float
     xmax: float
@@ -26,10 +27,10 @@ class BBox(BaseModel):
     def to_sql(self) -> str:
         return " AND ".join(
             [
-                f"bbox.xmax >= {self.xmin}",
-                f"bbox.xmin <= {self.xmax}",
-                f"bbox.ymax >= {self.ymin}",
-                f"bbox.ymin <= {self.ymax}",
+                f"{self.bbox_column}.xmax >= {self.xmin}",
+                f"{self.bbox_column}.xmin <= {self.xmax}",
+                f"{self.bbox_column}.ymax >= {self.ymin}",
+                f"{self.bbox_column}.ymin <= {self.ymax}",
             ]
         )
 
