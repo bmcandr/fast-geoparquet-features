@@ -1,6 +1,6 @@
 import logging
 import re
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -16,7 +16,12 @@ from starlette.templating import Jinja2Templates
 
 from app.enums import MediaType, OutputFormat
 from app.models import BBox, Link
-from app.serializers import stream_csv, stream_feature_collection, stream_geojsonseq
+from app.serializers import (
+    stream_csv,
+    stream_feature_collection,
+    stream_geojsonseq,
+    stream_parquet,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -183,7 +188,7 @@ async def stream_features(
     filter: str | None = None,
     filter_lang: FilterLang = "cql2-text",
     output_format: OutputFormat | None = None,
-):
+) -> AsyncGenerator[bytes]:
     """Stream features from GeoParquet."""
     rel = base_rel(
         con=con,
@@ -223,6 +228,28 @@ async def stream_features(
         stream = stream_csv(features)
 
     for chunk in stream:
+        yield chunk
+
+
+async def stream_features_to_parquet(
+    con: duckdb.DuckDBPyConnection,
+    url: str,
+    geom_column: str | None = None,
+    bbox_column: str | None = None,
+    bbox: BBox | None = None,
+    filter: str | None = None,
+    filter_lang: FilterLang = "cql2-text",
+) -> AsyncGenerator[bytes]:
+    """Stream features from GeoParquet."""
+    rel = base_rel(
+        con=con,
+        url=url,
+        bbox=bbox,
+        filter=filter,
+        filter_lang=filter_lang,
+    )
+
+    for chunk in stream_parquet(rel, geom_column=geom_column, bbox_column=bbox_column):
         yield chunk
 
 
@@ -267,27 +294,42 @@ async def get_features(
     ),
     offset: int = Query(default=0, ge=0),
     geom_column: str = Query(default="geometry"),
+    bbox_column: str = BBoxQuery,
     filter: str | None = Query(None, description="A CQL2 filter statement"),
     filter_lang: FilterLang = Query(default="cql2-text"),
     bbox: Annotated[BBox, str] | None = Depends(parse_bbox),
     f: OutputFormat = OutputFormat.GEOJSON,
 ):
     """Get Features"""
-    return StreamingResponse(
-        stream_features(
-            con=con,
-            url=url,
-            limit=limit,
-            offset=offset,
-            geom_column=geom_column,
-            bbox=bbox,
-            filter=filter,
-            filter_lang=filter_lang,
-            output_format=f,
-            request=request,
-        ),
-        media_type=MediaType[f.name],
-    )
+    if f in [OutputFormat.GEOPARQUET, OutputFormat.PARQUET]:
+        return StreamingResponse(
+            content=stream_features_to_parquet(
+                con=con,
+                url=url,
+                geom_column=geom_column,
+                bbox_column=bbox_column,
+                bbox=bbox,
+                filter=filter,
+                filter_lang=filter_lang,
+            ),
+            headers={"Content-Disposition": "attachment; filename=features.parquet"},
+        )
+    else:
+        return StreamingResponse(
+            stream_features(
+                con=con,
+                url=url,
+                limit=limit,
+                offset=offset,
+                geom_column=geom_column,
+                bbox=bbox,
+                filter=filter,
+                filter_lang=filter_lang,
+                output_format=f,
+                request=request,
+            ),
+            media_type=MediaType[f.name],
+        )
 
 
 @app.get("/features/count")

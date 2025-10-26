@@ -9,6 +9,8 @@ class MediaType(str, Enum):
     NDJSON = "application/ndjson"
     GEOJSON = "application/geo+json"
     GEOJSONSEQ = "application/geo+json-seq"
+    GEOPARQUET = "application/x-parquet"
+    PARQUET = "application/x-parquet"
     SCHEMAJSON = "application/schema+json"
     HTML = "text/html"
     TEXT = "text/plain"
@@ -24,6 +26,8 @@ class OutputFormat(str, Enum):
     GEOJSONSEQ = "geojsonseq"
     NDJSON = "ndjson"
     CSV = "csv"
+    GEOPARQUET = "geoparquet"
+    PARQUET = "parquet"
 
 
 MEDIA_TYPE_MAP = {

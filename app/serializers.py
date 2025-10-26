@@ -1,10 +1,16 @@
 import csv
+import io
 from collections.abc import Generator
 from typing import Any
 
+import duckdb
 import orjson
+import pyarrow.parquet as pq
+from pyproj import CRS
 
 from app.models import Link
+
+WGS84_CRS_JSON = CRS.from_epsg(4326).to_json_dict()
 
 
 def dump_feat(feat: dict[str, Any]) -> bytes:
@@ -74,3 +80,51 @@ def stream_csv(features: Generator[dict[str, Any]]) -> Generator[bytes]:
 
     for row in features:
         yield writer.writerow(row)
+
+
+def stream_parquet(
+    rel: duckdb.DuckDBPyRelation, geom_column: str, bbox_column: str
+) -> io.BytesIO:
+    # DuckDB → Arrow Table
+    filtered = rel.project(
+        f"ST_AsWKB({geom_column}) geometry, * EXCLUDE ({geom_column})"
+    ).limit(10_000)
+    reader = filtered.arrow()
+
+    # Optionally add GeoParquet metadata
+    column_meta = {
+        "encoding": "WKB",
+        "geometry_types": [],
+        "crs": WGS84_CRS_JSON,
+        "edges": "planar",
+        "covering": {
+            "bbox": {
+                "xmin": [f"{bbox_column}", "xmin"],
+                "ymin": [f"{bbox_column}", "ymin"],
+                "xmax": [f"{bbox_column}", "xmax"],
+                "ymax": [f"{bbox_column}", "ymax"],
+            }
+        },
+    }
+    geo_meta = {
+        "columns": {
+            "geometry": column_meta,
+        },
+        "primary_column": "geometry",
+        "version": "1.1.0",
+    }
+
+    schema = reader.schema.with_metadata(
+        {
+            **(reader.schema.metadata or {}),
+            b"geo": orjson.dumps(geo_meta),
+        }
+    )
+
+    buf = io.BytesIO()
+    with pq.ParquetWriter(buf, schema, compression="zstd") as writer:
+        for batch in reader:
+            writer.write_batch(batch)
+
+    buf.seek(0)
+    return buf
