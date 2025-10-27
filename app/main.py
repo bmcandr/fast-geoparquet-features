@@ -2,8 +2,9 @@ import logging
 import re
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 from urllib.parse import urlencode
 
 import cql2
@@ -15,7 +16,7 @@ from jinja2 import Environment, FileSystemLoader
 from starlette.templating import Jinja2Templates
 
 from app.enums import MediaType, OutputFormat
-from app.models import BBox, Link
+from app.models import BBox, CQL2FilterParams, Link
 from app.serializers import (
     stream_csv,
     stream_feature_collection,
@@ -30,10 +31,6 @@ jinja2_env = Environment(
     loader=FileSystemLoader(f"{Path(__file__).resolve().parent}/templates")
 )
 templates = Jinja2Templates(env=jinja2_env)
-
-FilterLang = Literal["cql2-text", "cql2-json"]
-
-BBoxQuery = Query(default="bbox")
 
 
 @asynccontextmanager
@@ -95,8 +92,7 @@ def base_rel(
     con: duckdb.DuckDBPyConnection,
     url: str,
     bbox: BBox | None,
-    filter: str | None,
-    filter_lang: FilterLang,
+    filter: cql2.Expr | None,
 ) -> duckdb.DuckDBPyRelation:
     filters = list()
 
@@ -106,12 +102,7 @@ def base_rel(
     cql_filter = None
     cql_params = None
     if filter:
-        parsed_filter = (
-            cql2.parse_text(filter)
-            if filter_lang == "cql2-text"
-            else cql2.parse_json(filter)
-        )
-        cql_filter = parsed_filter.to_sql()
+        cql_filter = filter.to_sql()
         filters.append(cql_filter.query)
         cql_params = cql_filter.params
 
@@ -183,10 +174,10 @@ async def stream_features(
     limit: int,
     offset: int,
     geom_column: str,
+    bbox_column: str,
     request: Request,
+    filter: cql2.Expr | None,
     bbox: BBox | None = None,
-    filter: str | None = None,
-    filter_lang: FilterLang = "cql2-text",
     output_format: OutputFormat | None = None,
 ) -> AsyncGenerator[bytes]:
     """Stream features from GeoParquet."""
@@ -195,61 +186,50 @@ async def stream_features(
         url=url,
         bbox=bbox,
         filter=filter,
-        filter_lang=filter_lang,
     )
     total = get_count(rel)
 
     offset = min(offset, max(total - limit, 0))
 
-    geom_conversion_func = (
-        "ST_AsText" if output_format in [OutputFormat.CSV] else "ST_AsGeoJSON"
-    )
+    geom_conversion_func = "ST_AsGeoJSON"
+    match output_format:
+        case OutputFormat.CSV:
+            geom_conversion_func = "ST_AsText"
+        case OutputFormat.GEOPARQUET | OutputFormat.PARQUET:
+            geom_conversion_func = "ST_AsWKB"
 
     filtered = rel.project(
         f"{geom_conversion_func}({geom_column}) {geom_column}, "
         f"* EXCLUDE ({geom_column})"
     ).limit(limit, offset=offset)
 
-    features = feature_generator(filtered, geom_column)
-    if output_format == OutputFormat.GEOJSON or output_format is None:
-        num_returned = get_count(filtered)
-        links = build_links(request, number_matched=total, limit=limit, offset=offset)
-        stream = stream_feature_collection(
-            features=features,
-            number_matched=total,
-            number_returned=num_returned,
-            limit=limit,
-            offset=offset,
-            links=links,
+    if output_format in [OutputFormat.GEOPARQUET, OutputFormat.PARQUET]:
+        stream = stream_parquet(
+            rel=filtered,
+            geom_column=geom_column,
+            bbox_column=bbox_column,
         )
-    elif output_format in [OutputFormat.GEOJSONSEQ, OutputFormat.NDJSON]:
-        stream = stream_geojsonseq(features)
-    elif output_format == OutputFormat.CSV:
-        stream = stream_csv(features)
+    else:
+        features = feature_generator(filtered, geom_column)
+        if output_format == OutputFormat.GEOJSON or output_format is None:
+            num_returned = get_count(filtered)
+            links = build_links(
+                request, number_matched=total, limit=limit, offset=offset
+            )
+            stream = stream_feature_collection(
+                features=features,
+                number_matched=total,
+                number_returned=num_returned,
+                limit=limit,
+                offset=offset,
+                links=links,
+            )
+        elif output_format in [OutputFormat.GEOJSONSEQ, OutputFormat.NDJSON]:
+            stream = stream_geojsonseq(features)
+        elif output_format == OutputFormat.CSV:
+            stream = stream_csv(features)
 
     for chunk in stream:
-        yield chunk
-
-
-async def stream_features_to_parquet(
-    con: duckdb.DuckDBPyConnection,
-    url: str,
-    geom_column: str | None = None,
-    bbox_column: str | None = None,
-    bbox: BBox | None = None,
-    filter: str | None = None,
-    filter_lang: FilterLang = "cql2-text",
-) -> AsyncGenerator[bytes]:
-    """Stream features from GeoParquet."""
-    rel = base_rel(
-        con=con,
-        url=url,
-        bbox=bbox,
-        filter=filter,
-        filter_lang=filter_lang,
-    )
-
-    for chunk in stream_parquet(rel, geom_column=geom_column, bbox_column=bbox_column):
         yield chunk
 
 
@@ -271,6 +251,21 @@ def parse_bbox(bbox: str | None = None) -> BBox | None:
         )
 
 
+GeomColumnQuery = Query(default="geometry", description="Geometry column")
+BBoxColumnQuery = Query(default="bbox", description="Bbox column")
+
+
+def get_response_headers(output_format: OutputFormat) -> dict[str, str]:
+    fname = f"features-{datetime.now(tz=UTC).timestamp()}"
+    match output_format:
+        case OutputFormat.CSV:
+            return {"Content-Disposition": f"attachment; filename={fname}.csv"}
+        case OutputFormat.GEOPARQUET | OutputFormat.PARQUET:
+            return {"Content-Disposition": f"attachment; filename={fname}.parquet"}
+        case _:
+            return {}
+
+
 @app.get(
     "/features",
     responses={
@@ -279,6 +274,7 @@ def parse_bbox(bbox: str | None = None) -> BBox | None:
                 MediaType.GEOJSON: {},
                 MediaType.GEOJSONSEQ: {},
                 MediaType.CSV: {},
+                MediaType.PARQUET: {},
             }
         }
     },
@@ -293,59 +289,43 @@ async def get_features(
         lte=10_000,
     ),
     offset: int = Query(default=0, ge=0),
-    geom_column: str = Query(default="geometry"),
-    bbox_column: str = BBoxQuery,
-    filter: str | None = Query(None, description="A CQL2 filter statement"),
-    filter_lang: FilterLang = Query(default="cql2-text"),
+    geom_column: str = GeomColumnQuery,
+    bbox_column: str = BBoxColumnQuery,
+    filter: CQL2FilterParams = Depends(CQL2FilterParams),
     bbox: Annotated[BBox, str] | None = Depends(parse_bbox),
     f: OutputFormat = OutputFormat.GEOJSON,
 ):
     """Get Features"""
-    if f in [OutputFormat.GEOPARQUET, OutputFormat.PARQUET]:
-        return StreamingResponse(
-            content=stream_features_to_parquet(
-                con=con,
-                url=url,
-                geom_column=geom_column,
-                bbox_column=bbox_column,
-                bbox=bbox,
-                filter=filter,
-                filter_lang=filter_lang,
-            ),
-            headers={"Content-Disposition": "attachment; filename=features.parquet"},
-        )
-    else:
-        return StreamingResponse(
-            stream_features(
-                con=con,
-                url=url,
-                limit=limit,
-                offset=offset,
-                geom_column=geom_column,
-                bbox=bbox,
-                filter=filter,
-                filter_lang=filter_lang,
-                output_format=f,
-                request=request,
-            ),
-            media_type=MediaType[f.name],
-        )
+    return StreamingResponse(
+        stream_features(
+            con=con,
+            url=url,
+            limit=limit,
+            offset=offset,
+            geom_column=geom_column,
+            bbox_column=bbox_column,
+            bbox=bbox,
+            filter=filter.cql_filter,
+            output_format=f,
+            request=request,
+        ),
+        media_type=MediaType[f.name],
+        headers=get_response_headers(f),
+    )
 
 
 @app.get("/features/count")
 def get_feature_count(
     con: duckdb.DuckDBPyConnection = Depends(duckdb_cursor),
     url: str = Query(),
-    filter: str | None = Query(None),
-    filter_lang: FilterLang = Query(default="cql2-text"),
+    filter_params: CQL2FilterParams = Depends(CQL2FilterParams),
     bbox: Annotated[BBox, str] | None = Depends(parse_bbox),
 ):
     rel = base_rel(
         con=con,
         url=url,
         bbox=bbox,
-        filter=filter,
-        filter_lang=filter_lang,
+        filter=filter_params.cql_filter,
     )
     total = get_count(rel)
     return {"numberMatched": total}
@@ -366,14 +346,11 @@ async def get_tile(
     x: int,
     y: int,
     url: str,
-    geom_column: str | None = Query(None),
-    bbox_column: str | None = Query(None),
-    filter: str | None = Query(None),
-    filter_lang: FilterLang = Query(default="cql2-text"),
+    geom_column: str = GeomColumnQuery,
+    bbox_column: str = BBoxColumnQuery,
+    filter_params: CQL2FilterParams = Depends(CQL2FilterParams),
     con: duckdb.DuckDBPyConnection = Depends(duckdb_cursor),
 ):
-    geom_column = geom_column or "geometry"
-
     tile_bbox = next(
         iter(
             con.sql(
@@ -407,20 +384,8 @@ async def get_tile(
             xmax=tile_bbox["max_x"],
             ymax=tile_bbox["max_y"],
         ),
-        filter=filter,
-        filter_lang=filter_lang,
+        filter=filter_params.cql_filter,
     )
-
-    # NOTE: ST_Intersects unnecessary after bbox filter?
-    #     rel.filter(f"""ST_Intersects(
-    #         {geom_column},
-    #         ST_Transform(
-    #             ST_TileEnvelope({z}, {x}, {y}),
-    #             'EPSG:3857',
-    #             'EPSG:4326',
-    #             always_xy := true
-    #         )
-    # )""")
 
     tile_blob = rel.aggregate(f"""ST_AsMVT(
         {{
@@ -458,10 +423,9 @@ async def get_tile(
 def viewer(
     request: Request,
     url: str = Query(),
-    geom_column: str | None = Query(None),
-    bbox_column: str = BBoxQuery,
-    filter: str | None = Query(None),
-    filter_lang: FilterLang | None = Query(default=None),
+    geom_column: str = GeomColumnQuery,
+    bbox_column: str = BBoxColumnQuery,
+    filter_params: CQL2FilterParams = Depends(CQL2FilterParams),
 ):
     params = {
         k: v
@@ -469,8 +433,8 @@ def viewer(
             "url": url,
             "geom_column": geom_column,
             "bbox_column": bbox_column,
-            "filter": filter,
-            "filter_lang": filter_lang,
+            "filter": filter_params.filter,
+            "filter_lang": filter_params.filter_lang,
         }.items()
         if v is not None
     }

@@ -7,7 +7,7 @@ A simple GeoParquet feature + vector tile server built with FastAPI and DuckDB. 
 * 🚀 Serve GeoJSON from GeoParquet directly via HTTP requests
 * ⚡ Fast queries with DuckDB (spatial extension enabled)
 * 🗂️ Filter features by bounding box or CQL expressions
-* 🌍 GeoJSON, GeoJSONSeq/ndjson, and CSV output formats supported
+* 🌍 GeoJSON, GeoJSONSeq/ndjson, CSV, and GeoParquet output formats supported
 * 🌐 Vector tiles (MVT/PBF) from GeoParquet on-the-fly
 * 🐍 Modern Python stack with FastAPI + async streaming responses
 
