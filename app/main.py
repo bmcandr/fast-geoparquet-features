@@ -1,6 +1,6 @@
 import logging
 import re
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import Generator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
     * A reusable DuckDB connection
     """
     con = duckdb.connect()
+    con.execute("PRAGMA enable_profiling='query_tree';")
     extensions = ["httpfs", "azure", "aws", "s3", "spatial"]
     con.execute("\n".join(f"INSTALL {ext}; LOAD {ext};" for ext in extensions))
     con.execute("SET http_keep_alive=false;")
@@ -168,7 +169,7 @@ def build_links(
     return links
 
 
-async def stream_features(
+def stream_features(
     con: duckdb.DuckDBPyConnection,
     url: str,
     limit: int,
@@ -176,10 +177,10 @@ async def stream_features(
     geom_column: str,
     bbox_column: str,
     request: Request,
+    output_format: OutputFormat,
     filter: cql2.Expr | None,
     bbox: BBox | None = None,
-    output_format: OutputFormat | None = None,
-) -> AsyncGenerator[bytes]:
+) -> Generator[bytes]:
     """Stream features from GeoParquet."""
     rel = base_rel(
         con=con,
@@ -204,7 +205,7 @@ async def stream_features(
     ).limit(limit, offset=offset)
 
     if output_format in [OutputFormat.GEOPARQUET, OutputFormat.PARQUET]:
-        stream = stream_parquet(
+        yield from stream_parquet(
             rel=filtered,
             geom_column=geom_column,
             bbox_column=bbox_column,
@@ -216,7 +217,7 @@ async def stream_features(
             links = build_links(
                 request, number_matched=total, limit=limit, offset=offset
             )
-            stream = stream_feature_collection(
+            yield from stream_feature_collection(
                 features=features,
                 number_matched=total,
                 number_returned=num_returned,
@@ -225,12 +226,9 @@ async def stream_features(
                 links=links,
             )
         elif output_format in [OutputFormat.GEOJSONSEQ, OutputFormat.NDJSON]:
-            stream = stream_geojsonseq(features)
+            yield from stream_geojsonseq(features)
         elif output_format == OutputFormat.CSV:
-            stream = stream_csv(features)
-
-    for chunk in stream:
-        yield chunk
+            yield from stream_csv(features)
 
 
 def duckdb_cursor(request: Request) -> duckdb.DuckDBPyConnection:
@@ -279,7 +277,7 @@ def get_response_headers(output_format: OutputFormat) -> dict[str, str]:
         }
     },
 )
-async def get_features(
+def get_features(
     request: Request,
     con: duckdb.DuckDBPyConnection = Depends(duckdb_cursor),
     url: str = Query(),
@@ -341,7 +339,7 @@ def get_feature_count(
         }
     },
 )
-async def get_tile(
+def get_tile(
     z: int,
     x: int,
     y: int,
