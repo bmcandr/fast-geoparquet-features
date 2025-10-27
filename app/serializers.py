@@ -86,10 +86,7 @@ def stream_parquet(
     rel: duckdb.DuckDBPyRelation, geom_column: str, bbox_column: str
 ) -> io.BytesIO:
     # DuckDB → Arrow Table
-    filtered = rel.project(
-        f"ST_AsWKB({geom_column}) geometry, * EXCLUDE ({geom_column})"
-    ).limit(10_000)
-    reader = filtered.arrow()
+    reader = rel.arrow()
 
     # Optionally add GeoParquet metadata
     column_meta = {
@@ -108,9 +105,9 @@ def stream_parquet(
     }
     geo_meta = {
         "columns": {
-            "geometry": column_meta,
+            geom_column: column_meta,
         },
-        "primary_column": "geometry",
+        "primary_column": geom_column,
         "version": "1.1.0",
     }
 

@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Literal
 
 
 class MediaType(str, Enum):
@@ -30,9 +31,4 @@ class OutputFormat(str, Enum):
     PARQUET = "parquet"
 
 
-MEDIA_TYPE_MAP = {
-    OutputFormat.GEOJSON: MediaType.GEOJSON,
-    OutputFormat.GEOJSONSEQ: MediaType.GEOJSONSEQ,
-    OutputFormat.NDJSON: MediaType.NDJSON,
-    OutputFormat.CSV: MediaType.CSV,
-}
+FilterLang = Literal["cql2-text", "cql2-json"]

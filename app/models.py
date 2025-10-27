@@ -1,8 +1,10 @@
 from typing import Literal, Self
 
-from pydantic import BaseModel
+import cql2
+from fastapi import Query
+from pydantic import BaseModel, model_validator
 
-from app.enums import MediaType
+from app.enums import FilterLang, MediaType
 
 
 class BBox(BaseModel):
@@ -33,6 +35,29 @@ class BBox(BaseModel):
                 f"{self.bbox_column}.ymin <= {self.ymax}",
             ]
         )
+
+
+class CQL2FilterParams(BaseModel):
+    filter: str | None = Query(default=None, description="CQL2 Filter")
+    filter_lang: FilterLang = Query(
+        default="cql2-text", description="CQL2 Filter Language"
+    )
+
+    @property
+    def cql_filter(self) -> cql2.Expr | None:
+        if self.filter:
+            cql_filter = (
+                cql2.parse_text(self.filter)
+                if self.filter_lang == "cql2-text"
+                else cql2.parse_json(self.filter)
+            )
+            return cql_filter
+
+    @model_validator(mode="after")
+    def validate_filter(self) -> Self:
+        if self.cql_filter:
+            self.cql_filter.validate()
+        return self
 
 
 class Link(BaseModel):

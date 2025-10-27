@@ -8,10 +8,10 @@ dependencies = [
     "cql2>=0.3.8",
     "duckdb>=1.4.0",
     "fastapi[standard]>=0.116.1",
-    "geopandas>=1.1.1",
     "jinja2>=3.1.6",
     "orjson>=3.11.3",
     "pyarrow>=21.0.0",
+    "pyproj>=3.7.2",
 ]
 
 [dependency-groups]
