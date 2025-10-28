@@ -1,9 +1,9 @@
 <!DOCTYPE html>
 <!-- Credit to @Maxxen: https://gist.github.com/Maxxen/37e4a9f8595ea5e6a20c0c8fbbefe955 -->
-<html>
+<html lang="en-us">
   <head>
     <meta charset="utf-8" />
-    <title>Vector Tile Viewer</title>
+    <title>fast-geoparquet-features Viewer</title>
     <meta
       name="viewport"
       content="initial-scale=1,maximum-scale=1,user-scalable=no"
@@ -31,66 +31,68 @@
     <script>
       const map = new maplibregl.Map({
         container: "map",
-        style: {
-          version: 8,
-          sources: {
-            features: {
-              type: "vector",
-              tiles: ["{{ tiles_url }}"],
-              minzoom: 2,
-            },
-            // Also use a public open source basemap
-            osm: {
-              type: "raster",
-              tiles: [
-                "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
-                "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
-                "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png",
-              ],
-              tileSize: 256,
-              minzoom: 0,
-            },
-          },
-          layers: [
-            {
-              id: "background",
-              type: "background",
-              paint: { "background-color": "#a0c8f0" },
-            },
-            {
-              id: "osm",
-              type: "raster",
-              source: "osm",
-              minzoom: 2,
-              maxzoom: 19,
-            },
-            {
-              id: "default",
-              type: "fill",
-              source: "features",
-              interactive: true,
-              "source-layer": "layer",
-              paint: {
-                "fill-color": "orange",
-                "fill-opacity": 0.6,
-                "fill-outline-color": "#ffffff",
-              },
-            },
-            {
-              id: "default-stroke",
-              type: "line",
-              source: "features",
-              "source-layer": "layer",
-              paint: {
-                "line-color": "black",
-                "line-width": 0.5,
-              },
-            },
-          ],
-        },
+        style:
+          "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
         // Zoom in on new york
         center: [-74.006, 40.7128],
         zoom: 16,
+      });
+      map.on("load", () => {
+        map.addSource("features", {
+          type: "vector",
+          tiles: ["{{ tiles_url }}"],
+          minzoom: 2,
+        });
+        map.addLayer({
+          id: "default",
+          type: "fill",
+          source: "features",
+          interactive: true,
+          "source-layer": "layer",
+          filter: ["==", ["geometry-type"], "Polygon"],
+          paint: {
+            "fill-color": "orange",
+            "fill-opacity": 0.6,
+            "fill-outline-color": "black",
+          },
+        });
+        map.addLayer({
+          id: "default-stroke",
+          type: "line",
+          source: "features",
+          "source-layer": "layer",
+          filter: ["==", ["geometry-type"], "LineString"],
+          paint: {
+            "line-color": "limegreen",
+            "line-width": 4,
+          },
+        });
+        map.addLayer({
+          id: "default-circle",
+          type: "circle",
+          source: "features",
+          "source-layer": "layer",
+          filter: ["==", ["geometry-type"], "Point"],
+          paint: {
+            "circle-color": "magenta",
+            "circle-stroke-color": "black",
+            "circle-stroke-width": 1,
+            "circle-opacity": 0.5,
+            "circle-radius": [
+              "interpolate",
+              ["linear"],
+              ["zoom"],
+              4,
+              0.5, // at zoom 4 → 0.5px
+              8,
+              1,
+              12,
+              2,
+              16,
+              4,
+            ],
+          },
+        });
       });
       map.addControl(new maplibregl.NavigationControl());
       // Add click handler to show feature properties
